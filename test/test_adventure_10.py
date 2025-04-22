@@ -1,54 +1,86 @@
+# test_adventure.py
 import pytest
-import pandas as pd
-from pandas.testing import assert_frame_equal, assert_series_equal
-import numpy as np
-from io import StringIO
+import sqlite3
+import os
+import adventure # Assumes student code is in adventure.py
 
-# Assuming the student's code is in 'adventure.py'
-import adventure
-
-# Sample CSV data mimicking expedition_data.csv for testing
-CSV_DATA = """ArtifactID,Type,Material,Weight_kg,EstValue,Depth_m,Description,Sector
-AZM001,Pottery Shard,Ceramic,0.5,50,2.5,Painted fragment,North
-AZM002,Statue Head,Marble,8.2,1500,8.0,Head of a deity?,West
-AZM003,Coin,Gold,0.1,800,1.5,Emperor Azmar inscription,North
-AZM004,Amulet,Jade,0.2,1200,5.5,Scarab beetle design,South
-AZM005,Spearhead,Bronze,1.5,300,4.0,,West
-AZM006,Goblet,Gold,0.8,2500,6.2,Intricate carvings,Central
-AZM007,Tablet,Clay,2.1,150,3.0,Cuneiform script fragment,North
-AZM008,Necklace,Gold,0.4,1800,5.0,Embedded with gems,Central
-AZM009,Pottery Shard,Ceramic,0.6,60,2.8,,North
-AZM010,Figurine,Bronze,3.5,600,7.5,Animal figure,West
-AZM011,Coin,Silver,0.05,200,1.8,Unknown ruler,North
-AZM012,Statue Base,Marble,150.0,5000,12.0,Massive stone base,Central
-AZM013,Amulet,Gold,0.3,1500,5.8,Eye symbol,South
-AZM014,Sword Hilt,Bronze,0.9,,9.0,Decorated hilt,West
-AZM015,Pottery Shard,Ceramic,0.4,40,2.2,Simple design,North
-AZM016,Mask,Gold,2.5,10000,11.5,Funerary mask,Central
-AZM017,Figurine,Ceramic,1.8,250,6.5,Humanoid shape,South
-AZM018,Coin,Bronze,0.15,20,1.2,Worn features,North
-AZM019,Statue Head,Marble,7.5,1300,8.5,Weathered features,West
-AZM020,Goblet,Silver,0.6,900,6.0,Plain silver goblet,Central
-"""
+# --- Fixture for Test Database ---
 
 @pytest.fixture
-def sample_df():
-    """Provides a sample DataFrame loaded from the CSV_DATA string."""
-    return pd.read_csv(StringIO(CSV_DATA))
-
-# Test 7: Function get_value_distribution_metric - Median Calculation
-def test_get_value_distribution_metric_correct_median(sample_df):
+def db_path(tmp_path):
     """
-    Tests get_value_distribution_metric calculates the correct median value,
-    ignoring potential NaNs.
+    Pytest fixture to create a temporary database for each test function.
+    Initializes the ledger using the student's function.
+    Yields the path to the database file.
     """
-    result_median = adventure.get_value_distribution_metric(sample_df)
+    # Create a unique path within the temporary directory provided by pytest
+    db = tmp_path / "test_dm_ledger.db"
+    db_file_path = str(db)
 
-    # Manually calculate median of EstValue, ignoring NaN for AZM014
-    # Values: [50, 1500, 800, 1200, 300, 2500, 150, 1800, 60, 600, 200, 5000, 1500, NaN, 40, 10000, 250, 20, 1300, 900]
-    # Sorted non-NaN values: [20, 40, 50, 60, 150, 200, 250, 300, 600, 800, 900, 1200, 1300, 1500, 1500, 1800, 2500, 5000, 10000] (19 values)
-    # Median is the (19+1)/2 = 10th value.
-    expected_median = 800.0
+    # Ensure the database starts clean for the test
+    if os.path.exists(db_file_path):
+        os.remove(db_file_path)
 
-    assert isinstance(result_median, float), "Return type should be float"
-    assert result_median == pytest.approx(expected_median)
+    # Use the student's function to initialize the database and table
+    adventure.initialize_ledger(db_file_path)
+
+    # Provide the path to the test function
+    yield db_file_path
+
+    # Clean up the database file after the test runs (optional, tmp_path often handles it)
+    # if os.path.exists(db_file_path):
+    #     os.remove(db_file_path)
+
+# --- Helper Function for Direct DB Verification ---
+
+def query_db(db_path, sql, params=()):
+    """Helper to run a SELECT query and fetch all results."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+    except sqlite3.Error as e:
+        print(f"Direct DB Query Error: {e}")
+        return None # Indicate error
+    finally:
+        if conn:
+            conn.close()
+
+
+
+def test_remove_loot_item_success_and_verify(db_path):
+    """
+    Test 7: Verifies removing a loot item. Checks return value and data removal.
+            Also tests removing a non-existent item returns False.
+    """
+    # Add items
+    id_to_remove = adventure.record_new_loot(db_path, "Wand of Magic Missiles", "Wand", 750, "Uncommon", "Crypt")
+    id_to_keep = adventure.record_new_loot(db_path, "Backpack", "Gear", 2, "Common", "General Store")
+    assert id_to_remove is not None and id_to_keep is not None, "Failed to record items for remove test."
+
+    # Remove one item
+    remove_result = adventure.remove_loot_item(db_path, id_to_remove)
+
+    # Assertions for successful removal
+    assert remove_result is True, f"remove_loot_item should return True for successful removal of ID {id_to_remove}."
+
+    # Verify removal using inspect_loot_item
+    removed_item_details = adventure.inspect_loot_item(db_path, id_to_remove)
+    assert removed_item_details is None, f"Item with ID {id_to_remove} should not be found after removal."
+
+    # Verify removal using direct DB query
+    db_data_removed = query_db(db_path, "SELECT * FROM loot WHERE id = ?", (id_to_remove,))
+    assert len(db_data_removed) == 0, f"Direct DB query found item {id_to_remove} after it should have been removed."
+
+    # Verify the other item still exists
+    kept_item_details = adventure.inspect_loot_item(db_path, id_to_keep)
+    assert kept_item_details is not None, f"Item {id_to_keep} that should have been kept was removed."
+    db_data_kept = query_db(db_path, "SELECT * FROM loot WHERE id = ?", (id_to_keep,))
+    assert len(db_data_kept) == 1, f"Direct DB query could not find item {id_to_keep} which should have been kept."
+
+    # Test removing a non-existent item
+    non_existent_id = 999
+    remove_fail_result = adventure.remove_loot_item(db_path, non_existent_id)
+    assert remove_fail_result is False, f"remove_loot_item should return False for non-existent ID {non_existent_id}."
